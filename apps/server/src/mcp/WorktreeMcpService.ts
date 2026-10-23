@@ -18,7 +18,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -26,7 +25,6 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { removeEmptyDirectory } from "../vcs/removeEmptyDirectory.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import type { McpInvocationScope, McpThreadInvocationScope } from "./McpInvocationContext.ts";
 
@@ -75,7 +73,6 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
 
   // Serializes workspace changes per thread: two concurrent handoffs could
   // otherwise both pass the worktreePath === null check and each create a
@@ -405,8 +402,8 @@ const make = Effect.gen(function* () {
           continuation,
           note:
             continuation.status === "scheduled"
-              ? "Handoff recorded. Changing the workspace detaches this provider session, so the current turn ends shortly after this call; the queued continuation prompt then starts the next turn inside the worktree with the conversation preserved. The worktree is not removed automatically when the thread is deleted."
-              : "Handoff recorded. Changing the workspace detaches this provider session, so the current turn ends shortly after this call; the conversation continues inside the worktree when the thread receives its next message. Pass continuationPrompt to resume automatically. The worktree is not removed automatically when the thread is deleted.",
+              ? "Handoff recorded. This turn still runs in the previous workspace, so end it now; the queued continuation prompt then starts the next turn inside the worktree with the conversation preserved. The worktree is not removed automatically when the thread is deleted."
+              : "Handoff recorded. This turn still runs in the previous workspace, so end it now; the conversation continues inside the worktree when the thread receives its next message. Pass continuationPrompt to resume automatically. The worktree is not removed automatically when the thread is deleted.",
         };
         return result;
       }),
@@ -459,32 +456,6 @@ const make = Effect.gen(function* () {
       asOperationFailed(`Unable to read the thread's folder '${folder}'`),
     );
 
-  // Removes the thread's own scratch folder once it has moved out. A fork can
-  // share the folder, and rmdir keeps anything written there meanwhile.
-  const removeScratchFolder = Effect.fn("WorktreeMcpService.removeScratchFolder")(function* (
-    thread: { readonly id: string; readonly projectId: ProjectId },
-    folder: string,
-  ) {
-    const scratchRoot = yield* managedFolders.scratchRoot;
-    if (
-      !Option.exists(
-        scratchRoot,
-        (root) => path.dirname(path.resolve(folder)) === path.resolve(root),
-      )
-    ) {
-      return;
-    }
-    const shared = yield* threadManagement
-      .listProjectThreads({ projectId: thread.projectId, includeSubagents: true })
-      .pipe(
-        Effect.map((threads) =>
-          threads.some((other) => other.id !== thread.id && other.worktreePath === folder),
-        ),
-      );
-    if (shared) return;
-    yield* removeEmptyDirectory(folder);
-  });
-
   const performSelectProject = Effect.fn("WorktreeMcpService.performSelectProject")(function* (
     scope: McpThreadInvocationScope,
     input: ThreadSelectProjectMcpInput,
@@ -524,9 +495,9 @@ const make = Effect.gen(function* () {
       input.continuationPrompt ??
       `This thread now works in the ${target.title} project at ${target.workspaceRoot}. Continue the user's request there.`;
 
-    // uninterruptibleMask: once the move commits, the scheduled session detach
-    // can sever this request's connection and interrupt the fiber, and the
-    // queued continuation is what restarts the thread in the project.
+    // uninterruptibleMask: once the move commits, the queued continuation is
+    // what starts the thread in the project, so a cancelled request must not
+    // skip it.
     return yield* Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         yield* restore(
@@ -577,20 +548,14 @@ const make = Effect.gen(function* () {
             }),
           );
 
-        if (thread.worktreePath !== null) {
-          yield* removeScratchFolder(thread, thread.worktreePath).pipe(
-            Effect.ignoreCause({ log: true }),
-          );
-        }
-
         const result: ThreadSelectProjectMcpResult = {
           projectId: target.id,
           workspaceRoot: target.workspaceRoot,
           continuation,
           note:
             continuation.status === "scheduled"
-              ? "Thread moved to the project's root. Changing the workspace detaches this provider session, so the current turn ends shortly after this call; the queued continuation then starts the next turn in the project with the conversation preserved. Use t3_worktree_handoff there if the work needs its own worktree."
-              : "Thread moved to the project's root. Changing the workspace detaches this provider session, so the current turn ends shortly after this call; the conversation continues in the project when the thread receives its next message.",
+              ? "Thread moved to the project's root. This turn still runs in the scratch folder, so end it now without touching files; the queued continuation then starts the next turn in the project with the conversation preserved. Use t3_worktree_handoff there if the work needs its own worktree."
+              : "Thread moved to the project's root. This turn still runs in the scratch folder, so end it now without touching files; the conversation continues in the project when the thread receives its next message.",
         };
         return result;
       }),
@@ -640,5 +605,4 @@ export const layer: Layer.Layer<
   | VcsStatusBroadcaster.VcsStatusBroadcaster
   | ManagedProjectFolders.ManagedProjectFolders
   | FileSystem.FileSystem
-  | Path.Path
 > = Layer.effect(WorktreeMcpService, make);

@@ -374,9 +374,10 @@ registered project, so a user can name the project in their first message
 instead of picking it in the UI. It works only while the thread's scratch folder
 is still empty; after that, `t3_thread_launch` with the project is the way in.
 The thread is re-pointed at the project root with no branch or worktree through
-the server-only `thread.project.set` command, which detaches the live provider
-session like any workspace change. A continuation message is queued so the next
-turn resumes in the project, and the empty scratch folder is removed.
+the server-only `thread.project.set` command. Like any workspace change made
+during a turn, the calling turn keeps its provider session; the next turn start
+replaces it in the new workspace. A continuation message is queued so that turn
+resumes the conversation in the project. The empty scratch folder stays.
 `t3_worktree_handoff` can follow when the work needs its own worktree.
 
 ### `t3_thread_list`

@@ -4,9 +4,8 @@ import { ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
  * The server picks the location in its managed worktrees folder.
- * Changing the thread's workspace detaches the live provider session, so the
- * current turn ends shortly after the handoff is recorded; the conversation
- * continues inside the worktree on the thread's next run.
+ * The current turn keeps its workspace; the conversation continues inside the
+ * worktree on the thread's next run.
  */
 export const WorktreeMcpHandoffInput = Schema.Struct({
   branch: TrimmedNonEmptyString.annotate({
@@ -33,7 +32,7 @@ export const WorktreeMcpHandoffInput = Schema.Struct({
   continuationPrompt: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
       description:
-        "Message queued as the thread's next turn after the handoff. The handoff detaches the current provider session, so pass the remaining work here to automatically resume inside the worktree; omit it to stop after the handoff and wait for the next message.",
+        "Message queued as the thread's next turn after the handoff. The current turn keeps the previous workspace, so pass the remaining work here to automatically resume inside the worktree; omit it to stop after the handoff and wait for the next message.",
     }),
   ),
 });

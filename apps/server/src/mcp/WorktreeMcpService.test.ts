@@ -4,7 +4,6 @@ import {
   CommandId,
   EnvironmentId,
   type OrchestrationV2ThreadProjection,
-  type OrchestrationV2ThreadShell,
   type Project,
   ProjectId,
   ProviderInstanceId,
@@ -123,8 +122,6 @@ interface HarnessOptions {
   readonly removeWorktreeFails?: boolean;
   readonly deleteLocalBranchFails?: boolean;
   readonly createWorktreeGate?: Effect.Effect<void>;
-  readonly scratchRoot?: string;
-  readonly otherThreadWorktreePaths?: ReadonlyArray<string>;
 }
 
 const makeHarness = (options: HarnessOptions = {}) => {
@@ -278,14 +275,6 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }),
   );
   const refreshStatus = vi.fn((_: string) => Effect.die("refreshStatus stub"));
-  const listProjectThreads = vi.fn((_: unknown) =>
-    Effect.succeed(
-      (options.otherThreadWorktreePaths ?? []).map((worktreePath, index) => ({
-        id: ThreadId.make(`thread-other-${index}`),
-        worktreePath,
-      })) as unknown as ReadonlyArray<OrchestrationV2ThreadShell>,
-    ),
-  );
   const runForThread = vi.fn((input: { readonly worktreePath: string }) => {
     switch (options.setupScript ?? "started") {
       case "no-script":
@@ -319,10 +308,8 @@ const makeHarness = (options: HarnessOptions = {}) => {
           dispatch,
           getThreadRecords,
           sendToThread,
-          listProjectThreads,
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
         Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
-          scratchRoot: Effect.succeed(Option.fromNullishOr(options.scratchRoot)),
           isScratchProject: (id) => Effect.succeed(id === scratchProjectId),
           namedProjectsRoot: "/projects",
         } satisfies Partial<ManagedProjectFolders.ManagedProjectFolders["Service"]>),
@@ -358,7 +345,6 @@ const makeHarness = (options: HarnessOptions = {}) => {
     scope,
     dispatch,
     sendToThread,
-    listProjectThreads,
     fetchWorktreeBaseCommit,
     createWorktree,
     removeWorktree,
@@ -742,15 +728,14 @@ const makeScratchFolder = Effect.gen(function* () {
   const scratchRoot = yield* fs.makeTempDirectoryScoped({ prefix: "select-project-scratch-" });
   const folder = path.join(scratchRoot, "2026-10-23-in-whatscord-fix-the-login-a1b2c3d4");
   yield* fs.makeDirectory(folder);
-  return { fs, path, scratchRoot, folder };
+  return { fs, path, folder };
 });
 
 describe("t3_thread_select_project", () => {
   it.effect("moves an untouched scratch thread to the project root and resumes it there", () =>
     Effect.gen(function* () {
-      const { fs, scratchRoot, folder } = yield* makeScratchFolder;
+      const { folder } = yield* makeScratchFolder;
       const harness = makeHarness({
-        scratchRoot,
         thread: { projectId: scratchProjectId, worktreePath: folder },
       });
 
@@ -779,17 +764,14 @@ describe("t3_thread_select_project", () => {
         workspaceRoot,
         continuation: { status: "scheduled", delivery: "queued" },
       });
-      expect(yield* fs.exists(folder)).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("queues the agent's own continuation and keeps a folder a fork still uses", () =>
+  it.effect("queues the agent's own continuation prompt", () =>
     Effect.gen(function* () {
-      const { fs, scratchRoot, folder } = yield* makeScratchFolder;
+      const { folder } = yield* makeScratchFolder;
       const harness = makeHarness({
-        scratchRoot,
         thread: { projectId: scratchProjectId, worktreePath: folder },
-        otherThreadWorktreePaths: [folder],
       });
 
       yield* runSelectProject(harness, { projectId, continuationPrompt: "Fix the login bug." });
@@ -797,16 +779,14 @@ describe("t3_thread_select_project", () => {
       expect(harness.sendToThread).toHaveBeenCalledWith(
         expect.objectContaining({ text: "Fix the login bug." }),
       );
-      expect(yield* fs.exists(folder)).toBe(true);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("refuses once the agent has written files to the scratch folder", () =>
     Effect.gen(function* () {
-      const { fs, path, scratchRoot, folder } = yield* makeScratchFolder;
+      const { fs, path, folder } = yield* makeScratchFolder;
       yield* fs.writeFileString(path.join(folder, "notes.md"), "started");
       const harness = makeHarness({
-        scratchRoot,
         thread: { projectId: scratchProjectId, worktreePath: folder },
       });
 
