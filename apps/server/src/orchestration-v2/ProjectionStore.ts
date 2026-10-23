@@ -6528,7 +6528,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getSettlementCandidates: readOnReader(getSettlementCandidates),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
-      getThreadProjection: readOnReader(getThreadProjection),
+      getThreadProjection,
       getTurnStartContext: readOnReader(getTurnStartContext),
       getTurnStartHistory: readOnReader(getTurnStartHistory),
       getRuntimeRecoveryProjection: readOnReader(getRuntimeRecoveryProjection),
