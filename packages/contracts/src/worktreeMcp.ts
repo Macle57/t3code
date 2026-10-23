@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
  * The server picks the location in its managed worktrees folder.
@@ -98,6 +98,27 @@ export const WorktreeMcpStatusResult = Schema.Struct({
   }),
 });
 export type WorktreeMcpStatusResult = typeof WorktreeMcpStatusResult.Type;
+
+export const ThreadSelectProjectMcpInput = Schema.Struct({
+  projectId: ProjectId.annotate({
+    description: "Project to move this thread into, as listed by t3_project_list.",
+  }),
+  continuationPrompt: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
+      description:
+        "Message queued as the thread's next turn, which starts in the project's root. Defaults to asking you to continue the user's request there.",
+    }),
+  ),
+});
+export type ThreadSelectProjectMcpInput = typeof ThreadSelectProjectMcpInput.Type;
+
+export const ThreadSelectProjectMcpResult = Schema.Struct({
+  projectId: ProjectId,
+  workspaceRoot: TrimmedNonEmptyString,
+  continuation: WorktreeMcpContinuationStatus,
+  note: Schema.String,
+});
+export type ThreadSelectProjectMcpResult = typeof ThreadSelectProjectMcpResult.Type;
 
 export class WorktreeMcpFailure extends Schema.TaggedError<WorktreeMcpFailure>()(
   "WorktreeMcpFailure",

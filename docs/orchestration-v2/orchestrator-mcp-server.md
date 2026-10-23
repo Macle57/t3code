@@ -192,7 +192,7 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The server exposes these orchestration tools, among others.
 
 ### `orchestrator_capabilities`
 
@@ -366,6 +366,18 @@ its own under the environment's Scratch project. For stacked PRs, use the parent
 `startFromOrigin: false`. The new thread may not run with broader runtime or
 interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
 launching again. `create_threads` remains the batch option for a shared checkout.
+
+### `t3_thread_select_project`
+
+Moves the calling thread out of the Scratch ("No project") project into a
+registered project, so a user can name the project in their first message
+instead of picking it in the UI. It works only while the thread's scratch folder
+is still empty; after that, `t3_thread_launch` with the project is the way in.
+The thread is re-pointed at the project root with no branch or worktree through
+the server-only `thread.project.set` command, which detaches the live provider
+session like any workspace change. A continuation message is queued so the next
+turn resumes in the project, and the empty scratch folder is removed.
+`t3_worktree_handoff` can follow when the work needs its own worktree.
 
 ### `t3_thread_list`
 

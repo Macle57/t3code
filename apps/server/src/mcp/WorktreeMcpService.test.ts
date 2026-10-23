@@ -4,6 +4,7 @@ import {
   CommandId,
   EnvironmentId,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShell,
   type Project,
   ProjectId,
   ProviderInstanceId,
@@ -18,6 +19,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -28,6 +30,7 @@ import {
   OrchestratorProjectionError,
 } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -38,6 +41,7 @@ import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 const environmentId = EnvironmentId.make("environment-worktree-test");
 const threadId = ThreadId.make("thread-worktree-test");
 const projectId = ProjectId.make("project-worktree-test");
+const scratchProjectId = ProjectId.make("project-scratch-test");
 const workspaceRoot = "/repo/project";
 
 const makeScope = (
@@ -56,13 +60,18 @@ const makeScope = (
 });
 
 interface ThreadFixture {
+  readonly projectId?: ProjectId;
+  readonly relationshipToParent?: "fork" | "subagent" | null;
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
   readonly archivedAt?: string | null;
   readonly deletedAt?: string | null;
 }
 
-const makeProjection = (overrides: ThreadFixture = {}): OrchestrationV2ThreadProjection =>
+const makeProjection = ({
+  relationshipToParent = null,
+  ...overrides
+}: ThreadFixture = {}): OrchestrationV2ThreadProjection =>
   ({
     thread: {
       id: threadId,
@@ -72,6 +81,7 @@ const makeProjection = (overrides: ThreadFixture = {}): OrchestrationV2ThreadPro
       worktreePath: null,
       archivedAt: null,
       deletedAt: null,
+      lineage: { parentThreadId: null, relationshipToParent, rootThreadId: threadId },
       ...overrides,
     },
   }) as OrchestrationV2ThreadProjection;
@@ -113,6 +123,8 @@ interface HarnessOptions {
   readonly removeWorktreeFails?: boolean;
   readonly deleteLocalBranchFails?: boolean;
   readonly createWorktreeGate?: Effect.Effect<void>;
+  readonly scratchRoot?: string;
+  readonly otherThreadWorktreePaths?: ReadonlyArray<string>;
 }
 
 const makeHarness = (options: HarnessOptions = {}) => {
@@ -195,9 +207,13 @@ const makeHarness = (options: HarnessOptions = {}) => {
     options.projectReadFails
       ? (Effect.fail("simulated project read failure") as never)
       : Effect.succeed(
-          id === projectId && options.projectMissing !== true
-            ? Option.some(project)
-            : Option.none(),
+          options.projectMissing === true
+            ? Option.none()
+            : id === projectId
+              ? Option.some(project)
+              : id === scratchProjectId
+                ? Option.some({ ...project, id, title: "No project" })
+                : Option.none(),
         ),
   );
   const removeWorktree = vi.fn((_: unknown) =>
@@ -262,6 +278,14 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }),
   );
   const refreshStatus = vi.fn((_: string) => Effect.die("refreshStatus stub"));
+  const listProjectThreads = vi.fn((_: unknown) =>
+    Effect.succeed(
+      (options.otherThreadWorktreePaths ?? []).map((worktreePath, index) => ({
+        id: ThreadId.make(`thread-other-${index}`),
+        worktreePath,
+      })) as unknown as ReadonlyArray<OrchestrationV2ThreadShell>,
+    ),
+  );
   const runForThread = vi.fn((input: { readonly worktreePath: string }) => {
     switch (options.setupScript ?? "started") {
       case "no-script":
@@ -295,7 +319,13 @@ const makeHarness = (options: HarnessOptions = {}) => {
           dispatch,
           getThreadRecords,
           sendToThread,
+          listProjectThreads,
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          scratchRoot: Effect.succeed(Option.fromNullishOr(options.scratchRoot)),
+          isScratchProject: (id) => Effect.succeed(id === scratchProjectId),
+          namedProjectsRoot: "/projects",
+        } satisfies Partial<ManagedProjectFolders.ManagedProjectFolders["Service"]>),
         Layer.mock(ProjectService.ProjectService)({
           getById,
         } satisfies Partial<ProjectService.ProjectService["Service"]>),
@@ -328,6 +358,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     scope,
     dispatch,
     sendToThread,
+    listProjectThreads,
     fetchWorktreeBaseCommit,
     createWorktree,
     removeWorktree,
@@ -691,6 +722,138 @@ describe("t3_worktree_status", () => {
         branch: "feature/existing",
         defaultStartFromOrigin: false,
       });
+    });
+  });
+});
+
+const runSelectProject = (
+  harness: ReturnType<typeof makeHarness>,
+  input: Parameters<WorktreeMcpService.WorktreeMcpService["Service"]["selectProject"]>[1],
+) =>
+  Effect.gen(function* () {
+    const service = yield* WorktreeMcpService.WorktreeMcpService;
+    return yield* service.selectProject(harness.scope, input);
+  }).pipe(Effect.provide(harness.layer));
+
+// A scratch root with one thread folder in it, the way ManagedProjectFolders lays them out.
+const makeScratchFolder = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const scratchRoot = yield* fs.makeTempDirectoryScoped({ prefix: "select-project-scratch-" });
+  const folder = path.join(scratchRoot, "2026-10-23-in-whatscord-fix-the-login-a1b2c3d4");
+  yield* fs.makeDirectory(folder);
+  return { fs, path, scratchRoot, folder };
+});
+
+describe("t3_thread_select_project", () => {
+  it.effect("moves an untouched scratch thread to the project root and resumes it there", () =>
+    Effect.gen(function* () {
+      const { fs, scratchRoot, folder } = yield* makeScratchFolder;
+      const harness = makeHarness({
+        scratchRoot,
+        thread: { projectId: scratchProjectId, worktreePath: folder },
+      });
+
+      const result = yield* runSelectProject(harness, { projectId });
+
+      expect(harness.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "thread.project.set",
+          threadId,
+          projectId,
+          expectedWorktreePath: folder,
+        }),
+      );
+      expect(harness.sendToThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId,
+          threadId,
+          mode: "queue",
+          createdBy: "agent",
+          creationSource: "mcp",
+          text: expect.stringContaining(workspaceRoot),
+        }),
+      );
+      expect(result).toMatchObject({
+        projectId,
+        workspaceRoot,
+        continuation: { status: "scheduled", delivery: "queued" },
+      });
+      expect(yield* fs.exists(folder)).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("queues the agent's own continuation and keeps a folder a fork still uses", () =>
+    Effect.gen(function* () {
+      const { fs, scratchRoot, folder } = yield* makeScratchFolder;
+      const harness = makeHarness({
+        scratchRoot,
+        thread: { projectId: scratchProjectId, worktreePath: folder },
+        otherThreadWorktreePaths: [folder],
+      });
+
+      yield* runSelectProject(harness, { projectId, continuationPrompt: "Fix the login bug." });
+
+      expect(harness.sendToThread).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Fix the login bug." }),
+      );
+      expect(yield* fs.exists(folder)).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses once the agent has written files to the scratch folder", () =>
+    Effect.gen(function* () {
+      const { fs, path, scratchRoot, folder } = yield* makeScratchFolder;
+      yield* fs.writeFileString(path.join(folder, "notes.md"), "started");
+      const harness = makeHarness({
+        scratchRoot,
+        thread: { projectId: scratchProjectId, worktreePath: folder },
+      });
+
+      const exit = yield* Effect.exit(runSelectProject(harness, { projectId }));
+
+      expectTypedFailure(exit, {
+        code: "invalid_request",
+        message: expect.stringContaining("t3_thread_launch"),
+      });
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(yield* fs.exists(path.join(folder, "notes.md"))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([
+    ["a thread that already has a project", { projectId }, projectId, "invalid_request"],
+    [
+      "an archived thread",
+      { projectId: scratchProjectId, archivedAt: "2026-01-02T00:00:00.000Z" },
+      projectId,
+      "invalid_request",
+    ],
+    [
+      "a subagent thread",
+      { projectId: scratchProjectId, relationshipToParent: "subagent" },
+      projectId,
+      "invalid_request",
+    ],
+    [
+      "an unknown project",
+      { projectId: scratchProjectId },
+      ProjectId.make("project-missing"),
+      "project_not_found",
+    ],
+    [
+      "the Scratch project itself",
+      { projectId: scratchProjectId },
+      scratchProjectId,
+      "invalid_request",
+    ],
+  ] as const)("refuses %s", ([, thread, target, code]) => {
+    const harness = makeHarness({ thread });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(runSelectProject(harness, { projectId: target }));
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code });
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.sendToThread).not.toHaveBeenCalled();
     });
   });
 });
