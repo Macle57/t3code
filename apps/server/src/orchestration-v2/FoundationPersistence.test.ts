@@ -3291,12 +3291,10 @@ it.effect("loads a shell snapshot while the writer connection is occupied", () =
         )
         .pipe(Effect.forkChild);
       yield* Deferred.await(held);
-      const snapshot = yield* projections
-        .getShellSnapshot()
-        .pipe(Effect.timeoutOption("2 seconds"));
+      const snapshot = yield* projections.getShellSnapshot();
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(writer);
-      assert.isTrue(Option.isSome(snapshot));
+      assert.deepEqual(snapshot.threads, []);
     }).pipe(Effect.provide(projectionLayer));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
